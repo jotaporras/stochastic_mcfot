@@ -30,19 +30,19 @@ meanvec = torch.tensor(
 stdvec = torch.tensor([17.4356, 0.5774]).detach()
 
 
-def generate_training_data(training_examples, min_demand, max_demand):
+def generate_flow_data(num_examples, min_demand, max_demand):
     """
     Generates the training data of a three node MCF linear program. sample runif the demand and split runif
     on the two inventory nodes, to make the network learn the structure of the graph.
     Should be a trivial example at best.
 
-    :param training_examples: number of training examples to generate
+    :param num_examples: number of training examples to generate
     :param min_demand:
     :param max_demand:
     :return:
     """
     datalist = []
-    for i in range(training_examples):
+    for i in range(num_examples):
         total_demand = float(np.random.randint(min_demand, max_demand)) * 1.0
         first_path_flow_pct = np.random.uniform(0.0, 1.0)
         second_path_flow_pct = 1 - first_path_flow_pct
@@ -93,7 +93,7 @@ class LinearFlowGCN(pl.LightningModule):
         and two MLP layers to learn the normalized flow of two arcs that should sum to one.
     """
 
-    def __init__(self, verbose=False):
+    def __init__(self, solved_epsilon, verbose=False):
         super(LinearFlowGCN, self).__init__()
         self.transform = transforms.NormalizeFeatures()
         self.conv1 = GCNConv(
@@ -107,6 +107,7 @@ class LinearFlowGCN(pl.LightningModule):
         )  # +1 because of the edge attribute
         self.lin2 = MLP([mlp_size + 1, 1])  # +1 because of the edge attribute
         self.verbose = verbose
+        self.solved_epsilon = solved_epsilon
 
     def forward(self, data):
         # data = self.transform(data)
@@ -151,22 +152,27 @@ class LinearFlowGCN(pl.LightningModule):
         optimizer = torch.optim.Adam(self.parameters(), lr=1e-3)
         return optimizer
 
+    def calculate_solved(self, y_hat, y):
+        return (F.l1_loss(y_hat, y) < self.solved_epsilon).int()
+
     def training_step(self, batch, batch_idx):
         y = batch.y_edges
-        y_hat = self(batch)
-        loss = F.binary_cross_entropy(y_hat.clamp(0, 1), y)
+        y_hat = self(batch).clamp(0, 1)
+        loss = F.binary_cross_entropy(y_hat, y)
+        solved = self.calculate_solved(y_hat, y)
         result = pl.TrainResult(loss)
         result.log("train_loss", loss)
+        result.log("train_solved", solved)
         return result
 
-    def validation_step(
-        self, batch, batch_idx
-    ):  # todo see if i can get away from implementing these
+    def validation_step(self, batch, batch_idx):
         y = batch.y_edges
         y_hat = self(batch)
         loss = F.binary_cross_entropy(y_hat.clamp(0, 1), y)
+        solved = self.calculate_solved(y_hat, y)
         result = pl.EvalResult(checkpoint_on=loss)
         result.log("val_loss", loss)
+        result.log("val_solved", solved)
         return result
 
     def test_step(self, batch, batch_idx):
@@ -174,7 +180,7 @@ class LinearFlowGCN(pl.LightningModule):
         y = batch.y_edges
         y_hat = self(batch)
         loss = F.binary_cross_entropy(y_hat.clamp(0, 1), y)
-        if self.verbose and batch_idx % 100:
+        if self.verbose:
             y_hat_d = y_hat.detach().flatten()
             y_d = y.detach().flatten()
             mse = F.mse_loss(y_hat_d, y_d)
@@ -183,22 +189,26 @@ class LinearFlowGCN(pl.LightningModule):
                 f"Test: {y_hat_d.tolist()} expected {y_d.tolist()} (Loss: {loss} MSE: {mse}) MAE: {mae}"
             )
         result = pl.EvalResult(checkpoint_on=loss)
-        result.log("val_loss", loss)
+        solved = self.calculate_solved(y_hat, y)
+        result.log("test_loss", loss)
+        result.log("test_solved", solved)
         return result
 
 
 if __name__ == "__main__":
     config_dict = {
-        "training_examples": 15000,
+        "training_examples": 2000,
+        "test_examples": 100,
         "max_epochs": 15,
         "min_demand": 10,
         "max_demand": 100,
         "watch_gradients": True,
+        "solved_epsilon": 1e-4,  # difference in l1 loss to consider the LP solved.
     }
     wandb.init(config=config_dict)
     config = wandb.config  # turn into an object
 
-    experiment_name = f"{config.training_examples}n-{config.max_epochs}epochs"
+    experiment_name = f"{config.training_examples}n-{config.max_epochs}epochs_debug"
 
     # Startup wandb logger.
     wandb_logger = WandbLogger(name=experiment_name, project="linearflowgcn")
@@ -206,17 +216,23 @@ if __name__ == "__main__":
     print("Good old print")
 
     # Create data and model
-    training_data = generate_training_data(
-        training_examples=config.training_examples,
+    training_data = generate_flow_data(
+        num_examples=config.training_examples,
+        min_demand=config.min_demand,
+        max_demand=config.max_demand,
+    )
+    test_data = generate_flow_data(
+        num_examples=config.test_examples,
         min_demand=config.min_demand,
         max_demand=config.max_demand,
     )
     data_loader = DataLoader(training_data, batch_size=1)
-    model = LinearFlowGCN(verbose=True)
+    test_loader = DataLoader(test_data, batch_size=1)
+    model = LinearFlowGCN(config.solved_epsilon, verbose=True)
 
     if config.watch_gradients:
         logging.info("Watching gradients")
-        wandb_logger.watch(model, log="gradients", log_freq=100)
+        wandb_logger.watch(model, log="all", log_freq=100)
     wandb_logger.log_hyperparams(dict(config))
 
     # Setup PL Trainer
