@@ -21,11 +21,12 @@ import wandb
 # these change if the datagen changes.
 logging.basicConfig(level=logging.INFO)
 NODE_FEATURES = 2
-NODE_EMBEDDINGS_1 = 32
-NODE_EMBEDDINGS_2 = 16
+NODE_EMBEDDINGS_1 = 128
+NODE_EMBEDDINGS_2 = 64
 # EDGE_ATTRIBUTES = 2 # TODO dont use
 MLP_INPUT = NODE_EMBEDDINGS_2 * 2  # stack two nodes
 MLP_EMBEDDINGS_1 = NODE_EMBEDDINGS_2  # half the input
+MLP_EMBEDDINGS_2 = int(NODE_EMBEDDINGS_2/2)  # half the input
 OUTPUT_SIZE = 1
 num_arcs = 2
 num_nodes = 3
@@ -114,7 +115,8 @@ class LinearFlowGCN(pl.LightningModule):
         self.conv2 = GCNConv(NODE_EMBEDDINGS_1, NODE_EMBEDDINGS_2)
         self.bn2 = torch.nn.BatchNorm1d(NODE_EMBEDDINGS_2)
         self.lin1 = MLP([MLP_INPUT, MLP_EMBEDDINGS_1])
-        self.lin2 = MLP([MLP_EMBEDDINGS_1, OUTPUT_SIZE])
+        self.lin2 = MLP([MLP_EMBEDDINGS_1, MLP_EMBEDDINGS_2])
+        self.lin3 = MLP([MLP_EMBEDDINGS_2, OUTPUT_SIZE])
 
         self.verbose = verbose
         self.solved_epsilon = solved_epsilon
@@ -170,10 +172,10 @@ class LinearFlowGCN(pl.LightningModule):
         fcn_arc_stack = F.relu(fcn_arc_stack)
 
         fcn_arc_stack = self.lin2(fcn_arc_stack)  # (batch_size,num_arcs)
+        fcn_arc_stack = F.relu(fcn_arc_stack)
 
-        # x = F.sigmoid(x)
+        fcn_arc_stack = self.lin3(fcn_arc_stack)
         out = torch.tanh(fcn_arc_stack)
-        # x = F.softmax(x) # output is % of edges in the optimal solution
 
         return out
 
@@ -225,72 +227,71 @@ class LinearFlowGCN(pl.LightningModule):
 
 
 if __name__ == "__main__":
-    for i in range(3):
-        config_dict = {
-            "training_examples": 20000,
-            "test_examples": 150,
-            "learning_rate": 1e-5,
-            # the best that have worked so far. TODO:  Do a sweep when the new architecture is ready
-            "batch_size": 64,  # TODO SWEEP
-            "max_epochs": 50,
-            "min_demand": 10,
-            "max_demand": 100,
-            "watch_gradients": True,
-            "solved_epsilon": 1e-5,  # difference in l1 loss to consider the LP solved.
-        }
-        wandb.init(config=config_dict)
-        config = wandb.config  # turn into an object
+    config_dict = {
+        "training_examples": 20000,
+        "test_examples": 150,
+        "learning_rate": 1e-5,
+        # the best that have worked so far. TODO:  Do a sweep when the new architecture is ready
+        "batch_size": 64,  # TODO SWEEP
+        "max_epochs": 50,
+        "min_demand": 10,
+        "max_demand": 100,
+        "watch_gradients": True,
+        "solved_epsilon": 1e-5,  # difference in l1 loss to consider the LP solved.
+    }
+    wandb.init(config=config_dict)
+    config = wandb.config  # turn into an object
 
-        experiment_name = f"{config.batch_size}batch_{config.training_examples}n-{config.max_epochs}epochs_lfgcnv2"
+    experiment_name = f"{config.batch_size}batch_{config.training_examples}n-{config.max_epochs}epochs_lfgcnv3"
 
-        # Startup wandb logger.
-        wandb_logger = WandbLogger(
-            name=experiment_name,
-            project="linearflowgcn",
-            tags=[
-                "experiment",
-                # "debug"
-            ],
-            version="0.0.2",
-        )
-        logging.info(f"Running script for experiment {experiment_name}")
-        print("Good old print")
+    # Startup wandb logger.
+    wandb_logger = WandbLogger(
+        name=experiment_name,
+        project="linearflowgcn",
+        tags=[
+            "experiment",
+            # "debug"
+        ],
+        version="0.0.3",
+    )
+    logging.info(f"Running script for experiment {experiment_name}")
+    print("Good old print")
 
-        # Create data and model
-        training_data = generate_flow_data(
-            num_examples=config.training_examples,
-            min_demand=config.min_demand,
-            max_demand=config.max_demand,
-        )
-        test_data = generate_flow_data(
-            num_examples=config.test_examples,
-            min_demand=config.min_demand,
-            max_demand=config.max_demand,
-        )
-        data_loader = DataLoader(training_data, batch_size=config.batch_size)
-        test_loader = DataLoader(test_data, batch_size=config.batch_size)
-        model = LinearFlowGCN(
-            config.solved_epsilon, config.learning_rate, config.batch_size, verbose=True
-        )
+    # Create data and model
+    training_data = generate_flow_data(
+        num_examples=config.training_examples,
+        min_demand=config.min_demand,
+        max_demand=config.max_demand,
+    )
+    test_data = generate_flow_data(
+        num_examples=config.test_examples,
+        min_demand=config.min_demand,
+        max_demand=config.max_demand,
+    )
+    data_loader = DataLoader(training_data, batch_size=config.batch_size)
+    test_loader = DataLoader(test_data, batch_size=config.batch_size)
+    model = LinearFlowGCN(
+        config.solved_epsilon, config.learning_rate, config.batch_size, verbose=True
+    )
 
-        if config.watch_gradients:
-            logging.info("Watching gradients")
-            wandb_logger.watch(model, log="gradients", log_freq=100)
-        wandb_logger.log_hyperparams(dict(config))
+    if config.watch_gradients:
+        logging.info("Watching gradients")
+        wandb_logger.watch(model, log="gradients", log_freq=100)
+    wandb_logger.log_hyperparams(dict(config))
 
-        # Setup PL Trainer
-        trainer = pl.Trainer(
-            max_epochs=config.max_epochs,
-            logger=wandb_logger,
-            default_root_dir=os.path.join(os.getcwd(), "models/"),
-            log_save_interval=10,
-        )
+    # Setup PL Trainer
+    trainer = pl.Trainer(
+        max_epochs=config.max_epochs,
+        logger=wandb_logger,
+        default_root_dir=os.path.join(os.getcwd(), "models/"),
+        log_save_interval=10,
+    )
 
-        # Fitting and testing
-        logging.info(f"Fitting model with config: {config}")
-        trainer.fit(model, data_loader, data_loader)
+    # Fitting and testing
+    logging.info(f"Fitting model with config: {config}")
+    trainer.fit(model, data_loader, data_loader)
 
-        logging.info("Calling test on fitted model")
-        trainer.test(test_dataloaders=data_loader)
+    logging.info("Calling test on fitted model")
+    trainer.test(test_dataloaders=data_loader)
 
-        logging.info("Done")
+    logging.info("Done")
