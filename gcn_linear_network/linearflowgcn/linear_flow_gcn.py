@@ -20,8 +20,15 @@ import wandb
 
 # these change if the datagen changes.
 logging.basicConfig(level=logging.INFO)
-num_node_features = 2
+NODE_FEATURES = 2
+NODE_EMBEDDINGS_1 = 32
+NODE_EMBEDDINGS_2 = 16
+# EDGE_ATTRIBUTES = 2 # TODO dont use
+MLP_INPUT = NODE_EMBEDDINGS_2 * 2  # stack two nodes
+MLP_EMBEDDINGS_1 = NODE_EMBEDDINGS_2  # half the input
+OUTPUT_SIZE = 1
 num_arcs = 2
+num_nodes = 3
 gcn_size = 64
 mlp_size = 64
 meanvec = torch.tensor(
@@ -93,26 +100,31 @@ class LinearFlowGCN(pl.LightningModule):
         and two MLP layers to learn the normalized flow of two arcs that should sum to one.
     """
 
-    def __init__(self, solved_epsilon, learning_rate, verbose=False):
+    def __init__(self, solved_epsilon, learning_rate, batch_size, verbose=False):
+        # NODE_FEATURES = 2
+        # NODE_EMBEDDINGS_1 = 32
+        # NODE_EMBEDDINGS_2 = 16
+        # #EDGE_ATTRIBUTES = 2
+        # MLP_INPUT = NODE_EMBEDDINGS_2*2
+        # MLP_EMBEDDINGS_1 = NODE_EMBEDDINGS_2 # half the input
         super(LinearFlowGCN, self).__init__()
         self.transform = transforms.NormalizeFeatures()
-        self.conv1 = GCNConv(
-            num_node_features, gcn_size
-        )  # first layer, take the features and output 16.
-        self.bn1 = torch.nn.BatchNorm1d(gcn_size)
-        self.conv2 = GCNConv(gcn_size, mlp_size)  # two embeddings per node
-        self.bn2 = torch.nn.BatchNorm1d(mlp_size)
-        self.lin1 = MLP(
-            [2 * mlp_size + 1, mlp_size + 1]
-        )  # +1 because of the edge attribute
-        self.lin2 = MLP([mlp_size + 1, 1])  # +1 because of the edge attribute
+        self.conv1 = GCNConv(NODE_FEATURES, NODE_EMBEDDINGS_1)
+        self.bn1 = torch.nn.BatchNorm1d(NODE_EMBEDDINGS_1)
+        self.conv2 = GCNConv(NODE_EMBEDDINGS_1, NODE_EMBEDDINGS_2)
+        self.bn2 = torch.nn.BatchNorm1d(NODE_EMBEDDINGS_2)
+        self.lin1 = MLP([MLP_INPUT, MLP_EMBEDDINGS_1])
+        self.lin2 = MLP([MLP_EMBEDDINGS_1, OUTPUT_SIZE])
+
         self.verbose = verbose
         self.solved_epsilon = solved_epsilon
         self.learning_rate = learning_rate
+        self.batch_size = batch_size
 
     def forward(self, data):
         # data = self.transform(data)
         x, edge_index, edge_attr = data.x, data.edge_index, data.edge_attr
+        batch_size = int(x.shape[0] / num_nodes)
 
         # normalizing
         edge_attr = edge_attr / edge_attr.sum()
@@ -132,16 +144,32 @@ class LinearFlowGCN(pl.LightningModule):
 
         #### MLP ####
         # pass MLP to each pair of node embeddings
-        arc_stack = torch.stack(
-            (
-                torch.cat((x[0], x[1], edge_attr[0])),
-                torch.cat((x[1], x[2], edge_attr[1])),
+        arc_embeddings = []
+        for g in range(batch_size):
+            # HARDCODED ARC STACKING, todo see if there's a better way to do this.
+
+            node_index_0 = (g * num_nodes) + 0
+            node_index_1 = (g * num_nodes) + 1
+            node_index_2 = (g * num_nodes) + 2
+            arc_index_0 = (g * num_arcs) + 0
+            arc_index_1 = (g * num_arcs) + 1
+            # fmt: off
+            arc_embedding = torch.stack(
+                # First arc
+                [torch.cat((x[node_index_0], x[node_index_1])),
+
+                # Second arc
+                torch.cat((x[node_index_1], x[node_index_2]))]
             )
-        )
+            # fmt: on
+            arc_embeddings.append(arc_embedding)
+        arc_stack = torch.cat(
+            arc_embeddings
+        )  # (batch_size,nodefeatures*4+edge_features*2)
         fcn_arc_stack = self.lin1(arc_stack)
         fcn_arc_stack = F.relu(fcn_arc_stack)
 
-        fcn_arc_stack = self.lin2(fcn_arc_stack)
+        fcn_arc_stack = self.lin2(fcn_arc_stack)  # (batch_size,num_arcs)
 
         # x = F.sigmoid(x)
         out = torch.tanh(fcn_arc_stack)
@@ -197,59 +225,72 @@ class LinearFlowGCN(pl.LightningModule):
 
 
 if __name__ == "__main__":
-    config_dict = {
-        "training_examples": 2000,
-        "test_examples": 100,
-        "learning_rate": 1e-5, # the best that have worked so far. TODO:  Do a sweep when the new architecture is ready
-        "max_epochs": 15,
-        "min_demand": 10,
-        "max_demand": 100,
-        "watch_gradients": True,
-        "solved_epsilon": 1e-4,  # difference in l1 loss to consider the LP solved.
-    }
-    wandb.init(config=config_dict)
-    config = wandb.config  # turn into an object
+    for i in range(3):
+        config_dict = {
+            "training_examples": 20000,
+            "test_examples": 150,
+            "learning_rate": 1e-5,
+            # the best that have worked so far. TODO:  Do a sweep when the new architecture is ready
+            "batch_size": 64,  # TODO SWEEP
+            "max_epochs": 50,
+            "min_demand": 10,
+            "max_demand": 100,
+            "watch_gradients": True,
+            "solved_epsilon": 1e-5,  # difference in l1 loss to consider the LP solved.
+        }
+        wandb.init(config=config_dict)
+        config = wandb.config  # turn into an object
 
-    experiment_name = f"withbatches_{config.training_examples}n-{config.max_epochs}epochs_debug"
+        experiment_name = f"{config.batch_size}batch_{config.training_examples}n-{config.max_epochs}epochs_lfgcnv2"
 
-    # Startup wandb logger.
-    wandb_logger = WandbLogger(name=experiment_name, project="linearflowgcn")
-    logging.info(f"Running script for experiment {experiment_name}")
-    print("Good old print")
+        # Startup wandb logger.
+        wandb_logger = WandbLogger(
+            name=experiment_name,
+            project="linearflowgcn",
+            tags=[
+                "experiment",
+                # "debug"
+            ],
+            version="0.0.2",
+        )
+        logging.info(f"Running script for experiment {experiment_name}")
+        print("Good old print")
 
-    # Create data and model
-    training_data = generate_flow_data(
-        num_examples=config.training_examples,
-        min_demand=config.min_demand,
-        max_demand=config.max_demand,
-    )
-    test_data = generate_flow_data(
-        num_examples=config.test_examples,
-        min_demand=config.min_demand,
-        max_demand=config.max_demand,
-    )
-    data_loader = DataLoader(training_data, batch_size=1)
-    test_loader = DataLoader(test_data, batch_size=1)
-    model = LinearFlowGCN(config.solved_epsilon, config.learning_rate, verbose=True)
+        # Create data and model
+        training_data = generate_flow_data(
+            num_examples=config.training_examples,
+            min_demand=config.min_demand,
+            max_demand=config.max_demand,
+        )
+        test_data = generate_flow_data(
+            num_examples=config.test_examples,
+            min_demand=config.min_demand,
+            max_demand=config.max_demand,
+        )
+        data_loader = DataLoader(training_data, batch_size=config.batch_size)
+        test_loader = DataLoader(test_data, batch_size=config.batch_size)
+        model = LinearFlowGCN(
+            config.solved_epsilon, config.learning_rate, config.batch_size, verbose=True
+        )
 
-    if config.watch_gradients:
-        logging.info("Watching gradients")
-        wandb_logger.watch(model, log="all", log_freq=100)
-    wandb_logger.log_hyperparams(dict(config))
+        if config.watch_gradients:
+            logging.info("Watching gradients")
+            wandb_logger.watch(model, log="gradients", log_freq=100)
+        wandb_logger.log_hyperparams(dict(config))
 
-    # Setup PL Trainer
-    trainer = pl.Trainer(
-        max_epochs=config.max_epochs,
-        logger=wandb_logger,
-        default_root_dir=os.path.join(os.getcwd(), "models/"),
-        log_save_interval=10,
-    )
+        # Setup PL Trainer
+        trainer = pl.Trainer(
+            max_epochs=config.max_epochs,
+            logger=wandb_logger,
+            default_root_dir=os.path.join(os.getcwd(), "models/"),
+            log_save_interval=10,
+        )
 
-    # Fitting and testing
-    logging.info(f"Fitting model with config: {config}")
-    trainer.fit(model, data_loader, data_loader)
+        # Fitting and testing
+        logging.info(f"Fitting model with config: {config}")
+        trainer.fit(model, data_loader, data_loader)
 
-    logging.info("Calling test on fitted model")
-    trainer.test(test_dataloaders=data_loader)
+        logging.info("Calling test on fitted model")
+        trainer.test(test_dataloaders=data_loader)
 
-    logging.info("Done")
+        logging.info("Done")
