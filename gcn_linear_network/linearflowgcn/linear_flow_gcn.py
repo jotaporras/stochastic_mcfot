@@ -93,7 +93,7 @@ class LinearFlowGCN(pl.LightningModule):
         and two MLP layers to learn the normalized flow of two arcs that should sum to one.
     """
 
-    def __init__(self, solved_epsilon, verbose=False):
+    def __init__(self, solved_epsilon, learning_rate, verbose=False):
         super(LinearFlowGCN, self).__init__()
         self.transform = transforms.NormalizeFeatures()
         self.conv1 = GCNConv(
@@ -108,6 +108,7 @@ class LinearFlowGCN(pl.LightningModule):
         self.lin2 = MLP([mlp_size + 1, 1])  # +1 because of the edge attribute
         self.verbose = verbose
         self.solved_epsilon = solved_epsilon
+        self.learning_rate = learning_rate
 
     def forward(self, data):
         # data = self.transform(data)
@@ -149,7 +150,7 @@ class LinearFlowGCN(pl.LightningModule):
         return out
 
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.parameters(), lr=1e-3)
+        optimizer = torch.optim.Adam(self.parameters(), lr=self.learning_rate)
         return optimizer
 
     def calculate_solved(self, y_hat, y):
@@ -199,6 +200,7 @@ if __name__ == "__main__":
     config_dict = {
         "training_examples": 2000,
         "test_examples": 100,
+        "learning_rate": 1e-5, # the best that have worked so far. TODO:  Do a sweep when the new architecture is ready
         "max_epochs": 15,
         "min_demand": 10,
         "max_demand": 100,
@@ -208,7 +210,7 @@ if __name__ == "__main__":
     wandb.init(config=config_dict)
     config = wandb.config  # turn into an object
 
-    experiment_name = f"{config.training_examples}n-{config.max_epochs}epochs_debug"
+    experiment_name = f"withbatches_{config.training_examples}n-{config.max_epochs}epochs_debug"
 
     # Startup wandb logger.
     wandb_logger = WandbLogger(name=experiment_name, project="linearflowgcn")
@@ -228,7 +230,7 @@ if __name__ == "__main__":
     )
     data_loader = DataLoader(training_data, batch_size=1)
     test_loader = DataLoader(test_data, batch_size=1)
-    model = LinearFlowGCN(config.solved_epsilon, verbose=True)
+    model = LinearFlowGCN(config.solved_epsilon, config.learning_rate, verbose=True)
 
     if config.watch_gradients:
         logging.info("Watching gradients")
