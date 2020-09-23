@@ -32,10 +32,27 @@ num_arcs = 2
 num_nodes = 3
 gcn_size = 64
 mlp_size = 64
-meanvec = torch.tensor(
-    [0.0000, 1.3333]
-).detach()  # todo change these values to the real mean of the generated dataset
-stdvec = torch.tensor([17.4356, 0.5774]).detach()
+
+def calculate_mean_std(dataloader:DataLoader):
+    with torch.no_grad():
+        alldata = torch.cat(tuple(b.x for b in dataloader))
+        meanvec = alldata.mean(0)
+        stdvec = alldata.std(0)
+        return meanvec,stdvec
+    # with torch.no_grad():
+    #     node_feature_accs = torch.tensor(NODE_FEATURES)
+    #     num_nodes = 0
+    #     for b in dataloader:
+    #         node_feature_accs = node_feature_accs+b.x.sum(0)
+    #         num_nodes += b.x.shape[0]
+    #     mean = node_feature_accs/num_nodes
+    #
+    #     stdevs = 0.0
+    #     for b in dataloader:
+    #         stdevs += ((b.x - mean)**2).sum(0)
+    #     stdevs = stdevs/num_nodes
+    #     stdevs = torch.sqrt(stdevs)
+    #     return mean,stdevs
 
 
 def generate_flow_data(num_examples, min_demand, max_demand):
@@ -101,7 +118,7 @@ class LinearFlowGCN(pl.LightningModule):
         and two MLP layers to learn the normalized flow of two arcs that should sum to one.
     """
 
-    def __init__(self, solved_epsilon, learning_rate, batch_size, verbose=False):
+    def __init__(self, solved_epsilon, learning_rate, batch_size,meanvec,stdvec, verbose=False):
         # NODE_FEATURES = 2
         # NODE_EMBEDDINGS_1 = 32
         # NODE_EMBEDDINGS_2 = 16
@@ -123,6 +140,9 @@ class LinearFlowGCN(pl.LightningModule):
         self.learning_rate = learning_rate
         self.batch_size = batch_size
 
+        self.meanvec=meanvec
+        self.stdvec=stdvec
+
     def forward(self, data):
         # data = self.transform(data)
         x, edge_index, edge_attr = data.x, data.edge_index, data.edge_attr
@@ -130,7 +150,7 @@ class LinearFlowGCN(pl.LightningModule):
 
         # normalizing
         edge_attr = edge_attr / edge_attr.sum()
-        x = (x - meanvec) / stdvec
+        x = (x - self.meanvec) / self.stdvec
 
         #### GCN ####
         x = self.conv1(
@@ -212,13 +232,15 @@ class LinearFlowGCN(pl.LightningModule):
         y_hat = self(batch)
         loss = F.binary_cross_entropy(y_hat.clamp(0, 1), y)
         if self.verbose:
-            y_hat_d = y_hat.detach().flatten()
-            y_d = y.detach().flatten()
-            mse = F.mse_loss(y_hat_d, y_d)
-            mae = F.l1_loss(y_hat_d, y_d)
-            logging.info(
-                f"Test: {y_hat_d.tolist()} expected {y_d.tolist()} (Loss: {loss} MSE: {mse}) MAE: {mae}"
-            )
+            y_hat_d = y_hat.detach().flatten().reshape(int(y.shape[0]/2),2)
+            y_d = y.detach().flatten().reshape(int(y.shape[0]/2),2)
+
+            for i in range(y_hat_d.shape[0]):
+                mse = F.mse_loss(y_hat_d[i], y_d[i])
+                mae = F.l1_loss(y_hat_d[i], y_d[i])
+                logging.info(
+                    f"Test: {y_hat_d[i].tolist()} expected {y_d[i].tolist()} (Loss: {loss} MSE: {mse}) MAE: {mae}"
+                )
         result = pl.EvalResult(checkpoint_on=loss)
         solved = self.calculate_solved(y_hat, y)
         result.log("test_loss", loss)
@@ -229,20 +251,22 @@ class LinearFlowGCN(pl.LightningModule):
 if __name__ == "__main__":
     config_dict = {
         "training_examples": 20000,
-        "test_examples": 150,
+        # "training_examples": 100,
+        "test_examples": 64,
         "learning_rate": 1e-5,
         # the best that have worked so far. TODO:  Do a sweep when the new architecture is ready
         "batch_size": 64,  # TODO SWEEP
-        "max_epochs": 50,
+        "max_epochs": 200,
         "min_demand": 10,
         "max_demand": 100,
         "watch_gradients": True,
         "solved_epsilon": 1e-5,  # difference in l1 loss to consider the LP solved.
+        "gradient_clip_val": 0.5
     }
     wandb.init(config=config_dict)
     config = wandb.config  # turn into an object
 
-    experiment_name = f"{config.batch_size}batch_{config.training_examples}n-{config.max_epochs}epochs_lfgcnv3"
+    experiment_name = f"lfgcnv4_{config.max_epochs}epochs_gradientclip"
 
     # Startup wandb logger.
     wandb_logger = WandbLogger(
@@ -250,9 +274,8 @@ if __name__ == "__main__":
         project="linearflowgcn",
         tags=[
             "experiment",
-            # "debug"
+             # "debug"
         ],
-        version="0.0.3",
     )
     logging.info(f"Running script for experiment {experiment_name}")
     print("Good old print")
@@ -270,8 +293,9 @@ if __name__ == "__main__":
     )
     data_loader = DataLoader(training_data, batch_size=config.batch_size)
     test_loader = DataLoader(test_data, batch_size=config.batch_size)
+    meanvec,stdvec = calculate_mean_std(training_data)
     model = LinearFlowGCN(
-        config.solved_epsilon, config.learning_rate, config.batch_size, verbose=True
+        config.solved_epsilon, config.learning_rate, config.batch_size,meanvec,stdvec, verbose=True
     )
 
     if config.watch_gradients:
@@ -285,6 +309,7 @@ if __name__ == "__main__":
         logger=wandb_logger,
         default_root_dir=os.path.join(os.getcwd(), "models/"),
         log_save_interval=10,
+        gradient_clip_val=config.gradient_clip_val
     )
 
     # Fitting and testing
