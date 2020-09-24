@@ -21,8 +21,8 @@ import wandb
 # these change if the datagen changes.
 logging.basicConfig(level=logging.INFO)
 NODE_FEATURES = 2
-NODE_EMBEDDINGS_1 = 128
-NODE_EMBEDDINGS_2 = 64
+NODE_EMBEDDINGS_1 = 16
+NODE_EMBEDDINGS_2 = 8
 # EDGE_ATTRIBUTES = 2 # TODO dont use
 MLP_INPUT = NODE_EMBEDDINGS_2 * 2  # stack two nodes
 MLP_EMBEDDINGS_1 = NODE_EMBEDDINGS_2  # half the input
@@ -80,11 +80,13 @@ def generate_flow_data(num_examples, min_demand, max_demand):
         # total_demand = 20
         if total_demand % 2 == 1:
             total_demand += 1
+        first_path_rounded_pct = first_path_inventory / total_demand
+        second_path_rounded_pct = second_path_inventory / total_demand
         nodes = torch.tensor(
             [
-                [first_path_inventory, 1.0],
-                [second_path_inventory, 1.0],
-                [-total_demand, 2.0],
+                [first_path_rounded_pct, 1.0],
+                [second_path_rounded_pct, 1.0],
+                [-total_demand/total_demand, 2.0],
             ],
             dtype=torch.float,
         )
@@ -92,11 +94,11 @@ def generate_flow_data(num_examples, min_demand, max_demand):
         edge_index = torch.tensor([[0, 2], [1, 2],], dtype=torch.long)
 
         edge_attr = torch.tensor(
-            [[first_path_inventory], [second_path_inventory],],  # todo not sure if used
+            [[first_path_rounded_pct], [second_path_rounded_pct], ],  # todo not sure if used
             dtype=torch.float,
         )
 
-        y_edges = torch.tensor([[first_path_flow_pct], [second_path_flow_pct]])
+        y_edges = torch.tensor([[first_path_rounded_pct], [second_path_rounded_pct]])
 
         d1 = Data(x=nodes, edge_index=edge_index, edge_attr=edge_attr, y_edges=y_edges)
         datalist.append(d1)
@@ -149,8 +151,8 @@ class LinearFlowGCN(pl.LightningModule):
         batch_size = int(x.shape[0] / num_nodes)
 
         # normalizing
-        edge_attr = edge_attr / edge_attr.sum()
-        x = (x - self.meanvec) / self.stdvec
+        # edge_attr = edge_attr / edge_attr.sum()
+        # x = (x - self.meanvec) / self.stdvec
 
         #### GCN ####
         x = self.conv1(
@@ -178,7 +180,7 @@ class LinearFlowGCN(pl.LightningModule):
             # fmt: off
             arc_embedding = torch.stack(
                 # First arc
-                [torch.cat((x[node_index_0], x[node_index_1])),
+                [torch.cat((x[node_index_0], x[node_index_2])),
 
                 # Second arc
                 torch.cat((x[node_index_1], x[node_index_2]))]
@@ -253,7 +255,7 @@ if __name__ == "__main__":
         "training_examples": 20000,
         # "training_examples": 100,
         "test_examples": 64,
-        "learning_rate": 1e-5,
+        "learning_rate": 5e-3,
         # the best that have worked so far. TODO:  Do a sweep when the new architecture is ready
         "batch_size": 256,  # TODO SWEEP
         "max_epochs": 200,
@@ -266,7 +268,7 @@ if __name__ == "__main__":
     wandb.init(config=config_dict)
     config = wandb.config  # turn into an object
 
-    experiment_name = f"lfgcnv4_{config.max_epochs}epochs_gradientclip_512bs_2"
+    experiment_name = f"lfgcnv6_{config.max_epochs}epochs_smallnet_{config.learning_rate}lr"
 
     # Startup wandb logger.
     wandb_logger = WandbLogger(
