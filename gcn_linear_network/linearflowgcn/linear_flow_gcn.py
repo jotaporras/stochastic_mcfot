@@ -255,18 +255,18 @@ if __name__ == "__main__":
         "test_examples": 64,
         "learning_rate": 1e-5,
         # the best that have worked so far. TODO:  Do a sweep when the new architecture is ready
-        "batch_size": 64,  # TODO SWEEP
+        "batch_size": 256,  # TODO SWEEP
         "max_epochs": 200,
         "min_demand": 10,
         "max_demand": 100,
         "watch_gradients": True,
         "solved_epsilon": 1e-5,  # difference in l1 loss to consider the LP solved.
-        "gradient_clip_val": 0.5
+        "gradient_clip_val": 0.9
     }
     wandb.init(config=config_dict)
     config = wandb.config  # turn into an object
 
-    experiment_name = f"lfgcnv4_{config.max_epochs}epochs_gradientclip"
+    experiment_name = f"lfgcnv4_{config.max_epochs}epochs_gradientclip_512bs_2"
 
     # Startup wandb logger.
     wandb_logger = WandbLogger(
@@ -291,7 +291,14 @@ if __name__ == "__main__":
         min_demand=config.min_demand,
         max_demand=config.max_demand,
     )
+
+    val_data = generate_flow_data(
+        num_examples=config.test_examples,
+        min_demand=config.min_demand,
+        max_demand=config.max_demand,
+    )
     data_loader = DataLoader(training_data, batch_size=config.batch_size)
+    val_loader = DataLoader(val_data, batch_size=config.batch_size)
     test_loader = DataLoader(test_data, batch_size=config.batch_size)
     meanvec,stdvec = calculate_mean_std(training_data)
     model = LinearFlowGCN(
@@ -308,15 +315,15 @@ if __name__ == "__main__":
         max_epochs=config.max_epochs,
         logger=wandb_logger,
         default_root_dir=os.path.join(os.getcwd(), "models/"),
-        log_save_interval=10,
+        log_save_interval=1,
         gradient_clip_val=config.gradient_clip_val
     )
 
     # Fitting and testing
     logging.info(f"Fitting model with config: {config}")
-    trainer.fit(model, data_loader, data_loader)
+    trainer.fit(model, data_loader, val_loader)
 
     logging.info("Calling test on fitted model")
-    trainer.test(test_dataloaders=data_loader)
+    trainer.test(test_dataloaders=test_loader)
 
     logging.info("Done")
