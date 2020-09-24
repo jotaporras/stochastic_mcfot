@@ -159,12 +159,12 @@ class LinearFlowGCN(pl.LightningModule):
             x, edge_index
         )  # receives the edge indices to determine neighbors
         x = self.bn1(x)  # receives the edge indices to determine neighbors
-        x = F.relu(x)
+        x = F.leaky_relu(x)
 
         # x = F.dropout(x,training=self.training)
         x = self.conv2(x, edge_index)
         x = self.bn2(x)  # receives the edge indices to determine neighbors
-        x = F.relu(x)
+        x = F.leaky_relu(x)
 
         #### MLP ####
         # pass MLP to each pair of node embeddings
@@ -191,13 +191,14 @@ class LinearFlowGCN(pl.LightningModule):
             arc_embeddings
         )  # (batch_size,nodefeatures*4+edge_features*2)
         fcn_arc_stack = self.lin1(arc_stack)
-        fcn_arc_stack = F.relu(fcn_arc_stack)
+        fcn_arc_stack = F.leaky_relu(fcn_arc_stack)
 
         fcn_arc_stack = self.lin2(fcn_arc_stack)  # (batch_size,num_arcs)
-        fcn_arc_stack = F.relu(fcn_arc_stack)
+        fcn_arc_stack = F.leaky_relu(fcn_arc_stack)
 
         fcn_arc_stack = self.lin3(fcn_arc_stack)
-        out = torch.tanh(fcn_arc_stack)
+        # out = torch.tanh(fcn_arc_stack)
+        out = torch.sigmoid(fcn_arc_stack)
 
         return out
 
@@ -268,7 +269,7 @@ if __name__ == "__main__":
     wandb.init(config=config_dict)
     config = wandb.config  # turn into an object
 
-    experiment_name = f"lfgcnv6_{config.max_epochs}epochs_smallnet_{config.learning_rate}lr"
+    experiment_name = f"lfgcnv6_{config.max_epochs}epochs_smallnet_{config.learning_rate}lr_leaky_outsig"
 
     # Startup wandb logger.
     wandb_logger = WandbLogger(
