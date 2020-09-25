@@ -69,7 +69,7 @@ def generate_flow_data(num_examples, min_demand, max_demand):
     datalist = []
     for i in range(num_examples):
         total_demand = float(np.random.randint(min_demand, max_demand)) * 1.0
-        first_path_flow_pct = np.random.uniform(0.0, 1.0)
+        first_path_flow_pct = np.round(np.random.uniform(0.0, 1.0), decimals=2)
         second_path_flow_pct = 1 - first_path_flow_pct
 
         first_path_inventory = int(total_demand * first_path_flow_pct) * 1.0
@@ -80,8 +80,9 @@ def generate_flow_data(num_examples, min_demand, max_demand):
         # total_demand = 20
         if total_demand % 2 == 1:
             total_demand += 1
-        first_path_rounded_pct = first_path_inventory / total_demand
-        second_path_rounded_pct = second_path_inventory / total_demand
+        first_path_rounded_pct = float(np.round(first_path_inventory / total_demand, decimals=2))
+        second_path_rounded_pct = float(np.round(second_path_inventory / total_demand, decimals=2))
+
         nodes = torch.tensor(
             [
                 [first_path_rounded_pct, 1.0],
@@ -207,7 +208,8 @@ class LinearFlowGCN(pl.LightningModule):
         return optimizer
 
     def calculate_solved(self, y_hat, y):
-        return (F.l1_loss(y_hat, y) < self.solved_epsilon).int()
+        with torch.no_grad():
+            return (F.l1_loss(y_hat, y,reduce=False) < self.solved_epsilon).int().sum().float()/float(y_hat.shape[0])
 
     def training_step(self, batch, batch_idx):
         y = batch.y_edges
@@ -256,20 +258,20 @@ if __name__ == "__main__":
         "training_examples": 20000,
         # "training_examples": 100,
         "test_examples": 64,
-        "learning_rate": 5e-3,
+        "learning_rate": 5e-4,
         # the best that have worked so far. TODO:  Do a sweep when the new architecture is ready
         "batch_size": 256,  # TODO SWEEP
-        "max_epochs": 200,
+        "max_epochs": 150,
         "min_demand": 10,
         "max_demand": 100,
         "watch_gradients": True,
-        "solved_epsilon": 1e-5,  # difference in l1 loss to consider the LP solved.
+        "solved_epsilon": 1e-2,  # difference in l1 loss to consider the LP solved.
         "gradient_clip_val": 0.9
     }
     wandb.init(config=config_dict)
     config = wandb.config  # turn into an object
 
-    experiment_name = f"lfgcnv6_{config.max_epochs}epochs_smallnet_{config.learning_rate}lr_leaky_outsig"
+    experiment_name = f"lfgcnv6_{config.max_epochs}epochs_smallnet_{config.learning_rate}lr_leaky_outsig_trunc2"
 
     # Startup wandb logger.
     wandb_logger = WandbLogger(
